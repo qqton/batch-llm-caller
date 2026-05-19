@@ -61,6 +61,7 @@
 
     textarea,
     input[type="text"],
+    input[type="password"],
     input[type="file"] {
       width: 100%;
       border: 1px solid var(--border);
@@ -71,6 +72,7 @@
     }
 
     textarea,
+    input[type="password"],
     input[type="text"] {
       padding: 11px 12px;
     }
@@ -197,7 +199,7 @@
 
     <div class="field">
       <label for="promptFile">Prompt file</label>
-      <input id="promptFile" type="file" accept=".txt,.csv,text/plain,text/csv">
+      <input id="promptFile" type="file" accept=".txt,.csv,.jpg,.jpeg,.png,text/plain,text/csv,image/jpeg,image/png">
       <p class="hint">Use a .txt or .csv file with one prompt per line.</p>
     </div>
 
@@ -217,7 +219,7 @@
         id="modelName"
         type="text"
         value="qwen3.5-0.8b"
-        placeholder="qwen3.5-0.8b (LM Studio), gemini-2.5-flash (Google AI Studio), meta-llama/llama-3.3-70b-instruct:free (OpenRouter)"
+        placeholder="Text: qwen3.5-0.8b (LM Studio), gemini-2.5-flash (Google AI Studio), meta-llama/llama-3.3-70b-instruct:free (OpenRouter). Image: qwen2.5-vl-7b (LM Studio), qwen/qwen2.5-vl-72b-instruct:free (OpenRouter)"
       >
     </div>
 
@@ -260,10 +262,24 @@
       });
     }
 
+    function readFileAsDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("Could not read the selected image."));
+        reader.readAsDataURL(file);
+      });
+    }
+
     function parseLines(text) {
       return text
         .split(/\r?\n/)
         .filter((line) => line.trim().length > 0);
+    }
+
+    function isImageFile(file) {
+      return /^image\/(jpeg|png)$/.test(file.type)
+        || /\.(jpe?g|png)$/i.test(file.name);
     }
 
     async function runBatch() {
@@ -301,6 +317,11 @@
       systemPromptInput.disabled = true;
 
       try {
+        if (isImageFile(file)) {
+          await runImageRequest(file, apiUrl, apiKey, model, systemPrompt);
+          return;
+        }
+
         const fileText = await readFileAsText(file);
         const prompts = parseLines(fileText);
 
@@ -339,7 +360,52 @@
       }
     }
 
+    async function runImageRequest(file, apiUrl, apiKey, model, systemPrompt) {
+      setStatus("Processing image...");
+
+      const dataUrl = await readFileAsDataUrl(file);
+      const promptText = systemPrompt.trim() || "Transcribe this image as accurately as you can.";
+      const response = await callImageModel(apiUrl, apiKey, model, promptText, dataUrl);
+      const row = {
+        row_number: 1,
+        input: file.name,
+        response
+      };
+
+      results.push(row);
+      appendResult(row);
+      setStatus("Done. Processed 1 image.");
+      downloadButton.style.display = "inline-block";
+    }
+
     async function callLmStudio(apiUrl, apiKey, model, systemPrompt, userPrompt) {
+      return sendChatCompletion(apiUrl, apiKey, {
+        model,
+        stream: false,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ]
+      });
+    }
+
+    async function callImageModel(apiUrl, apiKey, model, promptText, dataUrl) {
+      return sendChatCompletion(apiUrl, apiKey, {
+        model,
+        stream: false,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: promptText },
+              { type: "image_url", image_url: { url: dataUrl } }
+            ]
+          }
+        ]
+      });
+    }
+
+    async function sendChatCompletion(apiUrl, apiKey, payload) {
       try {
         const headers = {
           "Content-Type": "application/json"
@@ -352,14 +418,7 @@
         const response = await fetch(apiUrl, {
           method: "POST",
           headers,
-          body: JSON.stringify({
-            model,
-            stream: false,
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: userPrompt }
-            ]
-          })
+          body: JSON.stringify(payload)
         });
 
         const bodyText = await response.text();
